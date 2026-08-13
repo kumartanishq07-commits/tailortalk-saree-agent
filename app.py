@@ -27,10 +27,7 @@ import chromadb
 import open_clip
 import torch
 from PIL import Image
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.tools import tool
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_google_genai import ChatGoogleGenerativeAI
+import google.generativeai as genai
 
 # ------------------------------------------------------------------
 # Setup — loaded once per session, not per message
@@ -78,26 +75,24 @@ def embed_image(img: Image.Image):
 # ------------------------------------------------------------------
 # The agent tool — this is what the LLM calls when it decides a
 # similarity search is being requested. The image itself is passed
-# via session state (see note in run_search) since tool-calling LLMs
-# work with text/JSON arguments, not raw image bytes, in their
-# function-calling schema.
+# via session state since tool-calling LLMs work with text/JSON
+# arguments, not raw image bytes, in their function-calling schema.
 # ------------------------------------------------------------------
 
-@tool
-def search_similar_sarees(top_k: int = 5) -> str:
+def search_similar_sarees(top_k: int = 5) -> dict:
     """Search the saree catalogue for images visually similar to the
     image the user just uploaded. Call this whenever the user has
     uploaded/attached an image and is asking to find similar, matching,
-    or related sarees. Returns a JSON string of the top matches with
-    their name, similarity score, and product link.
+    or related sarees. Returns the top matches with their name,
+    similarity score, and product link.
 
     Args:
         top_k: number of similar results to return (default 5, max 10).
     """
-    top_k = min(max(top_k, 1), 10)
+    top_k = min(max(int(top_k), 1), 10)
     query_embedding = st.session_state.get("pending_query_embedding")
     if query_embedding is None:
-        return json.dumps({"error": "No uploaded image found to search with."})
+        return {"error": "No uploaded image found to search with."}
 
     results = collection.query(
         query_embeddings=[query_embedding.tolist()],
@@ -119,38 +114,60 @@ def search_similar_sarees(top_k: int = 5) -> str:
         })
 
     st.session_state["last_matches"] = matches
-    return json.dumps(matches)
+    return {"matches": matches}
+
+
+TOOL_FUNCTIONS = {"search_similar_sarees": search_similar_sarees}
+
+SYSTEM_INSTRUCTION = (
+    "You are TailorTalk's shopping assistant for a saree catalogue. "
+    "When a user has uploaded an image and asks to find similar, "
+    "matching, or related items, call the search_similar_sarees tool. "
+    "After getting results, describe them naturally and briefly — "
+    "mention colour/fabric similarity, not just that they're 'sarees'. "
+    "If no image has been uploaded yet, ask the user to upload one."
+)
 
 
 # ------------------------------------------------------------------
-# Agent wiring
+# Agent wiring — calls Google's SDK directly rather than through the
+# langchain_google_genai wrapper, which has a known bug forcing a
+# stale API path that 404s regardless of model name or version.
 # ------------------------------------------------------------------
 
+@st.cache_resource
 def build_agent():
-    # Requires GOOGLE_API_KEY in the environment (free tier from
-    # aistudio.google.com — set via Streamlit secrets when deployed).
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        temperature=0,
-        google_api_key=st.secrets.get("GOOGLE_API_KEY", os.environ.get("GOOGLE_API_KEY")),
+    api_key = st.secrets.get("GOOGLE_API_KEY", os.environ.get("GOOGLE_API_KEY"))
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(
+        model_name="gemini-2.5-flash",
+        tools=[search_similar_sarees],
+        system_instruction=SYSTEM_INSTRUCTION,
     )
+    return model
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "You are TailorTalk's shopping assistant for a saree catalogue. "
-         "When a user has uploaded an image and asks to find similar, "
-         "matching, or related items, call the search_similar_sarees tool. "
-         "After getting results, describe them naturally and briefly — "
-         "mention colour/fabric similarity, not just that they're 'sarees'. "
-         "If no image has been uploaded yet, ask the user to upload one."),
-        MessagesPlaceholder("chat_history"),
-        ("human", "{input}"),
-        MessagesPlaceholder("agent_scratchpad"),
-    ])
 
-    tools = [search_similar_sarees]
-    agent = create_tool_calling_agent(llm, tools, prompt)
-    return AgentExecutor(agent=agent, tools=tools, verbose=False)
+def run_agent_turn(chat_session, user_input: str):
+    """Sends a message, executes any tool call the model requests, and
+    returns the final natural-language response."""
+    response = chat_session.send_message(user_input)
+
+    for part in response.parts:
+        fn = getattr(part, "function_call", None)
+        if fn and fn.name in TOOL_FUNCTIONS:
+            args = dict(fn.args) if fn.args else {}
+            result = TOOL_FUNCTIONS[fn.name](**args)
+            response = chat_session.send_message(
+                genai.protos.Content(
+                    parts=[genai.protos.Part(
+                        function_response=genai.protos.FunctionResponse(
+                            name=fn.name,
+                            response={"result": result},
+                        )
+                    )]
+                )
+            )
+    return response.text
 
 
 # ------------------------------------------------------------------
@@ -162,8 +179,10 @@ st.caption("Upload a saree photo and chat naturally to find visually similar pie
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "agent" not in st.session_state:
-    st.session_state.agent = build_agent()
+if "gemini_model" not in st.session_state:
+    st.session_state.gemini_model = build_agent()
+if "chat_session" not in st.session_state:
+    st.session_state.chat_session = st.session_state.gemini_model.start_chat()
 
 uploaded_file = st.file_uploader("Upload a saree image", type=["jpg", "jpeg", "png", "webp"])
 
@@ -190,16 +209,7 @@ if user_input := st.chat_input("Ask me to find similar sarees…"):
 
     with st.chat_message("assistant"):
         with st.spinner("Searching…"):
-            chat_history = []
-            for m in st.session_state.messages[:-1]:
-                role = "human" if m["role"] == "user" else "ai"
-                chat_history.append((role, m["content"]))
-
-            result = st.session_state.agent.invoke({
-                "input": user_input,
-                "chat_history": chat_history,
-            })
-            response_text = result["output"]
+            response_text = run_agent_turn(st.session_state.chat_session, user_input)
             matches = st.session_state.pop("last_matches", None)
 
             st.write(response_text)
