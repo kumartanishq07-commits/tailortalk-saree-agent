@@ -1,5 +1,5 @@
 streamlit==1.38.0
-chromadb==0.5.5
+chromadb==1.5.9
 open_clip_torch==2.26.1
 torch==2.3.1
 torchvision==0.18.1
