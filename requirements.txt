@@ -1,0 +1,9 @@
+streamlit==1.38.0
+chromadb==0.5.5
+open_clip_torch==2.26.1
+torch==2.3.1
+torchvision==0.18.1
+pillow==10.4.0
+langchain==0.2.16
+langchain-google-genai==1.0.10
+langchain-core==0.2.38
