@@ -15,6 +15,14 @@ import io
 import json
 
 import streamlit as st
+
+# Streamlit's secrets manager does NOT automatically become a regular
+# environment variable inside the app — it has to be wired through
+# explicitly, or libraries that read os.environ (like the Google SDK
+# underneath langchain_google_genai) won't see it at all.
+if "GOOGLE_API_KEY" in st.secrets:
+    os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
+
 import chromadb
 import open_clip
 import torch
@@ -121,7 +129,11 @@ def search_similar_sarees(top_k: int = 5) -> str:
 def build_agent():
     # Requires GOOGLE_API_KEY in the environment (free tier from
     # aistudio.google.com — set via Streamlit secrets when deployed).
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0,
+        google_api_key=st.secrets.get("GOOGLE_API_KEY", os.environ.get("GOOGLE_API_KEY")),
+    )
 
     prompt = ChatPromptTemplate.from_messages([
         ("system",
