@@ -276,7 +276,7 @@ for msg in st.session_state.messages:
             cols = st.columns(min(len(msg["matches"]), 5))
             for col, m in zip(cols, msg["matches"]):
                 with col:
-                    st.image(m["image_url"], use_container_width=True)
+                    st.image(m["image_url"], use_column_width=True)
                     st.caption(f"{m['name'][:30]}…\nSimilarity: {m['similarity']}")
                     st.markdown(f"[View]({m['link']})")
 
@@ -295,7 +295,7 @@ if user_input := st.chat_input("Ask me to find similar sarees…"):
                 cols = st.columns(min(len(matches), 5))
                 for col, m in zip(cols, matches):
                     with col:
-                        st.image(m["image_url"], use_container_width=True)
+                        st.image(m["image_url"], use_column_width=True)
                         st.caption(f"{m['name'][:30]}…\nSimilarity: {m['similarity']}")
                         st.markdown(f"[View]({m['link']})")
 
