@@ -143,7 +143,7 @@ SYSTEM_INSTRUCTION = (
 # through the SDK layer that's misbehaving.
 # ------------------------------------------------------------------
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-flash-latest"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 # Function declaration in Gemini's REST schema format (this is the JSON
