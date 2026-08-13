@@ -27,7 +27,7 @@ import chromadb
 import open_clip
 import torch
 from PIL import Image
-import google.generativeai as genai
+import requests
 
 # ------------------------------------------------------------------
 # Setup — loaded once per session, not per message
@@ -130,13 +130,50 @@ SYSTEM_INSTRUCTION = (
 
 
 # ------------------------------------------------------------------
-# Agent wiring — calls Google's SDK directly rather than through the
-# langchain_google_genai wrapper, which has a known bug forcing a
-# stale API path that 404s regardless of model name or version.
+# Agent wiring — talks to the Gemini REST API directly with `requests`,
+# bypassing the google-generativeai SDK entirely.
+#
+# Why: the SDK (and the langchain_google_genai wrapper before it) both
+# 404'd on every model name we tried. Root cause, confirmed via a
+# working browser ListModels test: newer Google API keys use a
+# different format (prefixed "AQ." instead of the old "AIzaSy..."),
+# and the older SDK versions available at the time of writing mishandle
+# that format internally. The raw REST endpoint has no such problem —
+# it accepts the key correctly, so we call it directly instead of going
+# through the SDK layer that's misbehaving.
 # ------------------------------------------------------------------
 
-@st.cache_resource
-def build_agent():
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+# Function declaration in Gemini's REST schema format (this is the JSON
+# equivalent of what genai.GenerativeModel(tools=[...]) built for us
+# automatically from the Python function's docstring/signature — since
+# we're no longer using the SDK, we declare it explicitly instead).
+FUNCTION_DECLARATIONS = [
+    {
+        "name": "search_similar_sarees",
+        "description": (
+            "Search the saree catalogue for images visually similar to the "
+            "image the user just uploaded. Call this whenever the user has "
+            "uploaded/attached an image and is asking to find similar, "
+            "matching, or related sarees. Returns the top matches with "
+            "their name, similarity score, and product link."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "top_k": {
+                    "type": "INTEGER",
+                    "description": "number of similar results to return (default 5, max 10)",
+                }
+            },
+        },
+    }
+]
+
+
+def get_api_key() -> str:
     api_key = st.secrets.get("GOOGLE_API_KEY", os.environ.get("GOOGLE_API_KEY"))
     if not api_key:
         st.error(
@@ -145,36 +182,63 @@ def build_agent():
             'GOOGLE_API_KEY = "your-key-here"'
         )
         st.stop()
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        tools=[search_similar_sarees],
-        system_instruction=SYSTEM_INSTRUCTION,
+    return api_key
+
+
+def call_gemini(contents: list) -> dict:
+    """One raw REST call to Gemini's generateContent endpoint."""
+    payload = {
+        "contents": contents,
+        "tools": [{"functionDeclarations": FUNCTION_DECLARATIONS}],
+        "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
+    }
+    resp = requests.post(
+        GEMINI_URL,
+        params={"key": get_api_key()},
+        json=payload,
+        timeout=30,
     )
-    return model
+    if not resp.ok:
+        # Surface Google's actual error body in the UI instead of a bare
+        # traceback — this is exactly the detail that was hidden from us
+        # before, buried inside the SDK's exception handling.
+        st.error(f"Gemini API error {resp.status_code}: {resp.text}")
+        st.stop()
+    return resp.json()
 
 
-def run_agent_turn(chat_session, user_input: str):
+def run_agent_turn(user_input: str) -> str:
     """Sends a message, executes any tool call the model requests, and
-    returns the final natural-language response."""
-    response = chat_session.send_message(user_input)
+    returns the final natural-language response. Conversation history is
+    kept in st.session_state['gemini_contents'] since we're no longer
+    using the SDK's chat_session object to track it for us."""
+    contents = st.session_state.gemini_contents
+    contents.append({"role": "user", "parts": [{"text": user_input}]})
 
-    for part in response.parts:
-        fn = getattr(part, "function_call", None)
-        if fn and fn.name in TOOL_FUNCTIONS:
-            args = dict(fn.args) if fn.args else {}
-            result = TOOL_FUNCTIONS[fn.name](**args)
-            response = chat_session.send_message(
-                genai.protos.Content(
-                    parts=[genai.protos.Part(
-                        function_response=genai.protos.FunctionResponse(
-                            name=fn.name,
-                            response={"result": result},
-                        )
-                    )]
-                )
-            )
-    return response.text
+    data = call_gemini(contents)
+    parts = data["candidates"][0]["content"]["parts"]
+    contents.append({"role": "model", "parts": parts})
+
+    # If the model asked to call our tool, run it and send the result back.
+    for part in parts:
+        fn = part.get("functionCall")
+        if fn and fn["name"] in TOOL_FUNCTIONS:
+            args = fn.get("args", {}) or {}
+            result = TOOL_FUNCTIONS[fn["name"]](**args)
+            contents.append({
+                "role": "user",
+                "parts": [{
+                    "functionResponse": {
+                        "name": fn["name"],
+                        "response": {"result": result},
+                    }
+                }],
+            })
+            data = call_gemini(contents)
+            parts = data["candidates"][0]["content"]["parts"]
+            contents.append({"role": "model", "parts": parts})
+
+    return "".join(p.get("text", "") for p in parts)
 
 
 # ------------------------------------------------------------------
@@ -195,10 +259,8 @@ with st.sidebar:
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "gemini_model" not in st.session_state:
-    st.session_state.gemini_model = build_agent()
-if "chat_session" not in st.session_state:
-    st.session_state.chat_session = st.session_state.gemini_model.start_chat()
+if "gemini_contents" not in st.session_state:
+    st.session_state.gemini_contents = []
 
 uploaded_file = st.file_uploader("Upload a saree image", type=["jpg", "jpeg", "png", "webp"])
 
@@ -225,7 +287,7 @@ if user_input := st.chat_input("Ask me to find similar sarees…"):
 
     with st.chat_message("assistant"):
         with st.spinner("Searching…"):
-            response_text = run_agent_turn(st.session_state.chat_session, user_input)
+            response_text = run_agent_turn(user_input)
             matches = st.session_state.pop("last_matches", None)
 
             st.write(response_text)

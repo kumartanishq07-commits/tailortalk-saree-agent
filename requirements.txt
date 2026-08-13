@@ -4,4 +4,4 @@ open_clip_torch==2.26.1
 torch==2.3.1
 torchvision==0.18.1
 pillow==10.4.0
-google-generativeai==0.8.3
+requests==2.32.3
