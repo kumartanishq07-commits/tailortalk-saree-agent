@@ -138,6 +138,13 @@ SYSTEM_INSTRUCTION = (
 @st.cache_resource
 def build_agent():
     api_key = st.secrets.get("GOOGLE_API_KEY", os.environ.get("GOOGLE_API_KEY"))
+    if not api_key:
+        st.error(
+            "GOOGLE_API_KEY is missing or empty. Check Streamlit Cloud → "
+            "your app → Settings → Secrets, and confirm it's saved exactly as:\n\n"
+            'GOOGLE_API_KEY = "your-key-here"'
+        )
+        st.stop()
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash",
@@ -176,6 +183,15 @@ def run_agent_turn(chat_session, user_input: str):
 
 st.title("🧵 TailorTalk — Saree Finder")
 st.caption("Upload a saree photo and chat naturally to find visually similar pieces.")
+
+# Temporary diagnostic — confirms the secret is actually reaching the app
+# without exposing the key itself. Safe to remove once things work.
+_debug_key = st.secrets.get("GOOGLE_API_KEY", os.environ.get("GOOGLE_API_KEY"))
+with st.sidebar:
+    if _debug_key:
+        st.caption(f"✅ API key loaded ({len(_debug_key)} chars, starts with '{_debug_key[:4]}...')")
+    else:
+        st.caption("❌ No API key found in secrets or environment")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
