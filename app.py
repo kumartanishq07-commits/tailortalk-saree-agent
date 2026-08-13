@@ -121,7 +121,7 @@ def search_similar_sarees(top_k: int = 5) -> str:
 def build_agent():
     # Requires GOOGLE_API_KEY in the environment (free tier from
     # aistudio.google.com — set via Streamlit secrets when deployed).
-    llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
 
     prompt = ChatPromptTemplate.from_messages([
         ("system",
