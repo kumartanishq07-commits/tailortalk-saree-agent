@@ -122,11 +122,14 @@ TOOL_FUNCTIONS = {"search_similar_sarees": search_similar_sarees}
 
 SYSTEM_INSTRUCTION = (
     "You are TailorTalk's shopping assistant for a saree catalogue. "
-    "When a user has uploaded an image and asks to find similar, "
-    "matching, or related items, call the search_similar_sarees tool. "
-    "After getting results, describe them naturally and briefly — "
-    "mention colour/fabric similarity, not just that they're 'sarees'. "
-    "If no image has been uploaded yet, ask the user to upload one."
+    "Each user message starts with a system marker stating whether an "
+    "image is currently uploaded — trust that marker exactly, it is "
+    "ground truth. When the marker says an image is uploaded and the "
+    "user asks to find similar, matching, or related items, call the "
+    "search_similar_sarees tool. After getting results, describe them "
+    "naturally and briefly — mention colour/fabric similarity, not just "
+    "that they're 'sarees'. If the marker says no image is uploaded, ask "
+    "the user to upload one instead of calling the tool."
 )
 
 
@@ -196,6 +199,11 @@ def call_gemini(contents: list, max_retries: int = 3) -> dict:
         "contents": contents,
         "tools": [{"functionDeclarations": FUNCTION_DECLARATIONS}],
         "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
+        # temperature=0 makes the tool-calling decision deterministic —
+        # without this, Gemini defaults to temperature=1, so identical
+        # requests ("find similar sarees") could inconsistently trigger
+        # the search tool from one message to the next.
+        "generationConfig": {"temperature": 0},
     }
     last_error = None
     for attempt in range(max_retries):
@@ -237,7 +245,22 @@ def run_agent_turn(user_input: str) -> str:
     kept in st.session_state['gemini_contents'] since we're no longer
     using the SDK's chat_session object to track it for us."""
     contents = st.session_state.gemini_contents
-    contents.append({"role": "user", "parts": [{"text": user_input}]})
+
+    # The model never sees the actual image or its embedding — it only
+    # knows an image was uploaded if we tell it. Stating this as ground
+    # truth on every turn (rather than leaving it to be inferred from
+    # conversation wording) makes tool-calling reliable instead of
+    # dependent on how the request happens to be phrased.
+    has_image = st.session_state.get("pending_query_embedding") is not None
+    status_note = (
+        "[System: An image has been uploaded and is ready to search.]"
+        if has_image else
+        "[System: No image has been uploaded yet.]"
+    )
+    contents.append({
+        "role": "user",
+        "parts": [{"text": f"{status_note}\n{user_input}"}],
+    })
 
     data = call_gemini(contents)
     parts = data["candidates"][0]["content"]["parts"]
