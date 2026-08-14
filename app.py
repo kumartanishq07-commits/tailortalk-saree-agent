@@ -13,6 +13,7 @@ connecting it there (see README.md).
 import os
 import io
 import json
+import time
 
 import streamlit as st
 
@@ -185,26 +186,49 @@ def get_api_key() -> str:
     return api_key
 
 
-def call_gemini(contents: list) -> dict:
-    """One raw REST call to Gemini's generateContent endpoint."""
+def call_gemini(contents: list, max_retries: int = 3) -> dict:
+    """One REST call to Gemini's generateContent endpoint, with retries
+    for transient failures (503 "high demand" or slow responses under
+    load) — both are common on the free tier and resolve on their own
+    within a few seconds, so a short retry loop avoids surfacing a scary
+    error for what is usually a temporary blip."""
     payload = {
         "contents": contents,
         "tools": [{"functionDeclarations": FUNCTION_DECLARATIONS}],
         "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
     }
-    resp = requests.post(
-        GEMINI_URL,
-        params={"key": get_api_key()},
-        json=payload,
-        timeout=30,
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(
+                GEMINI_URL,
+                params={"key": get_api_key()},
+                json=payload,
+                timeout=60,
+            )
+            if resp.status_code == 503:
+                last_error = f"503 (high demand): {resp.text}"
+                time.sleep(2 * (attempt + 1))
+                continue
+            if not resp.ok:
+                # Surface Google's actual error body in the UI instead of a
+                # bare traceback — this is exactly the detail that was
+                # hidden from us before, buried inside the SDK's exception
+                # handling.
+                st.error(f"Gemini API error {resp.status_code}: {resp.text}")
+                st.stop()
+            return resp.json()
+        except requests.exceptions.ReadTimeout:
+            last_error = "Request timed out"
+            time.sleep(2 * (attempt + 1))
+            continue
+
+    st.error(
+        f"Gemini API is temporarily unavailable after {max_retries} attempts "
+        f"({last_error}). This is usually load on Google's free tier — "
+        f"please wait a moment and try again."
     )
-    if not resp.ok:
-        # Surface Google's actual error body in the UI instead of a bare
-        # traceback — this is exactly the detail that was hidden from us
-        # before, buried inside the SDK's exception handling.
-        st.error(f"Gemini API error {resp.status_code}: {resp.text}")
-        st.stop()
-    return resp.json()
+    st.stop()
 
 
 def run_agent_turn(user_input: str) -> str:
