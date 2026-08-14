@@ -248,15 +248,6 @@ def run_agent_turn(user_input: str) -> str:
 st.title("🧵 TailorTalk — Saree Finder")
 st.caption("Upload a saree photo and chat naturally to find visually similar pieces.")
 
-# Temporary diagnostic — confirms the secret is actually reaching the app
-# without exposing the key itself. Safe to remove once things work.
-_debug_key = st.secrets.get("GOOGLE_API_KEY", os.environ.get("GOOGLE_API_KEY"))
-with st.sidebar:
-    if _debug_key:
-        st.caption(f"✅ API key loaded ({len(_debug_key)} chars, starts with '{_debug_key[:4]}...')")
-    else:
-        st.caption("❌ No API key found in secrets or environment")
-
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "gemini_contents" not in st.session_state:
